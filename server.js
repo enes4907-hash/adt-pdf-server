@@ -1,17 +1,14 @@
 // ============================================
 //  ADT Treatment Plan - PDF Generation Server
-//  Puppeteer + Express
+//  Puppeteer + Express (Render-ready)
 // ============================================
 
 const express = require('express');
 const puppeteer = require('puppeteer');
 
 const app = express();
-
-// Allow large HTML payloads (the page is ~1.8MB)
 app.use(express.json({ limit: '25mb' }));
 
-// CORS - allow requests from your Netlify site
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
@@ -20,12 +17,10 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check (UptimeRobot pings this to keep server awake)
 app.get('/', (req, res) => {
   res.send('ADT PDF Server is running.');
 });
 
-// Reuse one browser instance (faster - no relaunch each request)
 let browserPromise = null;
 function getBrowser() {
   if (!browserPromise) {
@@ -35,7 +30,9 @@ function getBrowser() {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--single-process',
+        '--no-zygote'
       ]
     });
   }
@@ -50,38 +47,25 @@ app.post('/generate-pdf', async (req, res) => {
   try {
     const browser = await getBrowser();
     page = await browser.newPage();
-
-    // Mobile-aspect width, retina quality
     await page.setViewport({ width: 430, height: 1200, deviceScaleFactor: 2 });
-
-    // Load the HTML and wait for network to settle
     await page.setContent(html, { waitUntil: 'networkidle0', timeout: 60000 });
 
-    // Make sure ALL fonts + images are fully loaded (fixes missing images)
     await page.evaluate(async () => {
-      if (document.fonts && document.fonts.ready) {
-        await document.fonts.ready;
-      }
+      if (document.fonts && document.fonts.ready) { await document.fonts.ready; }
       const imgs = Array.from(document.images);
-      await Promise.all(
-        imgs.map(img => {
-          if (img.complete && img.naturalHeight !== 0) return Promise.resolve();
-          return new Promise(resolve => {
-            img.addEventListener('load', resolve);
-            img.addEventListener('error', resolve);
-            setTimeout(resolve, 8000); // safety timeout
-          });
-        })
-      );
+      await Promise.all(imgs.map(img => {
+        if (img.complete && img.naturalHeight !== 0) return Promise.resolve();
+        return new Promise(resolve => {
+          img.addEventListener('load', resolve);
+          img.addEventListener('error', resolve);
+          setTimeout(resolve, 8000);
+        });
+      }));
     });
 
-    // Small extra settle time
     await new Promise(r => setTimeout(r, 400));
 
-    // Measure full content height -> single tall page (no black gaps, no cut-off)
-    const height = await page.evaluate(() => {
-      return Math.ceil(document.body.scrollHeight);
-    });
+    const height = await page.evaluate(() => Math.ceil(document.body.scrollHeight));
 
     const pdf = await page.pdf({
       width: '430px',
@@ -97,7 +81,6 @@ app.post('/generate-pdf', async (req, res) => {
       'Content-Length': pdf.length
     });
     res.send(pdf);
-
   } catch (err) {
     console.error('PDF generation error:', err);
     res.status(500).send('PDF generation failed: ' + err.message);
