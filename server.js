@@ -1,13 +1,13 @@
 // ============================================
 //  ADT Treatment Plan - PDF Generation Server
-//  Puppeteer + Express (Render-ready)
+//  Puppeteer + Express (Render-ready, robust)
 // ============================================
 
 const express = require('express');
 const puppeteer = require('puppeteer');
 
 const app = express();
-app.use(express.json({ limit: '25mb' }));
+app.use(express.json({ limit: '30mb' }));
 
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -21,22 +21,22 @@ app.get('/', (req, res) => {
   res.send('ADT PDF Server is running.');
 });
 
-let browserPromise = null;
-function getBrowser() {
-  if (!browserPromise) {
-    browserPromise = puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--single-process',
-        '--no-zygote'
-      ]
-    });
-  }
-  return browserPromise;
+// Reuse browser; relaunch if it died or a previous launch failed
+let browser = null;
+async function getBrowser() {
+  try {
+    if (browser && browser.connected) return browser;
+  } catch (e) {}
+  browser = await puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu'
+    ]
+  });
+  return browser;
 }
 
 app.post('/generate-pdf', async (req, res) => {
@@ -45,25 +45,29 @@ app.post('/generate-pdf', async (req, res) => {
 
   let page;
   try {
-    const browser = await getBrowser();
-    page = await browser.newPage();
-    await page.setViewport({ width: 430, height: 1200, deviceScaleFactor: 2 });
-    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 60000 });
+    const b = await getBrowser();
+    page = await b.newPage();
 
+    // Quality vs memory balance for free tier
+    await page.setViewport({ width: 430, height: 1200, deviceScaleFactor: 1.5 });
+
+    // Load HTML (scripts already stripped client-side, so this is fast)
+    await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 45000 });
+
+    // Wait for fonts + images, but never hang (race with timeout)
     await page.evaluate(async () => {
-      if (document.fonts && document.fonts.ready) { await document.fonts.ready; }
-      const imgs = Array.from(document.images);
-      await Promise.all(imgs.map(img => {
-        if (img.complete && img.naturalHeight !== 0) return Promise.resolve();
-        return new Promise(resolve => {
-          img.addEventListener('load', resolve);
-          img.addEventListener('error', resolve);
-          setTimeout(resolve, 8000);
-        });
-      }));
+      const fontsReady = (document.fonts && document.fonts.ready)
+        ? document.fonts.ready : Promise.resolve();
+      const imgs = Array.from(document.images).map(img => {
+        if (img.complete) return Promise.resolve();
+        return new Promise(r => { img.onload = img.onerror = r; });
+      });
+      const all = Promise.all([fontsReady, ...imgs]);
+      const timeout = new Promise(r => setTimeout(r, 6000));
+      await Promise.race([all, timeout]);
     });
 
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, 300));
 
     const height = await page.evaluate(() => Math.ceil(document.body.scrollHeight));
 
@@ -81,13 +85,19 @@ app.post('/generate-pdf', async (req, res) => {
       'Content-Length': pdf.length
     });
     res.send(pdf);
+
   } catch (err) {
     console.error('PDF generation error:', err);
+    // If the browser crashed, drop it so the next request relaunches a fresh one
+    try { if (browser) { await browser.close(); } } catch (e) {}
+    browser = null;
     res.status(500).send('PDF generation failed: ' + err.message);
   } finally {
-    if (page) await page.close();
+    try { if (page) await page.close(); } catch (e) {}
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('PDF server listening on port ' + PORT));
+app.listen(PORT, '0.0.0.0', () => {
+  console.log('PDF server listening on port ' + PORT);
+});
