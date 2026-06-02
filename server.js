@@ -1,6 +1,6 @@
 // ============================================
 //  ADT Treatment Plan - PDF Generation Server
-//  Puppeteer + Express (Render-ready, robust)
+//  Puppeteer + Express (low-memory / Render free tier)
 // ============================================
 
 const express = require('express');
@@ -21,7 +21,6 @@ app.get('/', (req, res) => {
   res.send('ADT PDF Server is running.');
 });
 
-// Reuse browser; relaunch if it died or a previous launch failed
 let browser = null;
 async function getBrowser() {
   try {
@@ -33,7 +32,13 @@ async function getBrowser() {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-gpu'
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-background-timer-throttling',
+      '--disable-features=site-per-process',
+      '--js-flags=--max-old-space-size=460'
     ]
   });
   return browser;
@@ -48,13 +53,12 @@ app.post('/generate-pdf', async (req, res) => {
     const b = await getBrowser();
     page = await b.newPage();
 
-    // Quality vs memory balance for free tier
-    await page.setViewport({ width: 430, height: 1200, deviceScaleFactor: 1.5 });
+    // deviceScaleFactor 1 = lowest memory (document stays sharp enough)
+    await page.setViewport({ width: 430, height: 1000, deviceScaleFactor: 1 });
 
-    // Load HTML (scripts already stripped client-side, so this is fast)
     await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
-    // Wait for fonts + images, but never hang (race with timeout)
+    // Wait for fonts + images, capped so it never hangs
     await page.evaluate(async () => {
       const fontsReady = (document.fonts && document.fonts.ready)
         ? document.fonts.ready : Promise.resolve();
@@ -62,9 +66,10 @@ app.post('/generate-pdf', async (req, res) => {
         if (img.complete) return Promise.resolve();
         return new Promise(r => { img.onload = img.onerror = r; });
       });
-      const all = Promise.all([fontsReady, ...imgs]);
-      const timeout = new Promise(r => setTimeout(r, 6000));
-      await Promise.race([all, timeout]);
+      await Promise.race([
+        Promise.all([fontsReady, ...imgs]),
+        new Promise(r => setTimeout(r, 6000))
+      ]);
     });
 
     await new Promise(r => setTimeout(r, 300));
@@ -88,8 +93,7 @@ app.post('/generate-pdf', async (req, res) => {
 
   } catch (err) {
     console.error('PDF generation error:', err);
-    // If the browser crashed, drop it so the next request relaunches a fresh one
-    try { if (browser) { await browser.close(); } } catch (e) {}
+    try { if (browser) await browser.close(); } catch (e) {}
     browser = null;
     res.status(500).send('PDF generation failed: ' + err.message);
   } finally {
