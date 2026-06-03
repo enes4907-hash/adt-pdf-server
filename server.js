@@ -76,7 +76,7 @@ app.post('/generate-pdf', async (req, res) => {
 
     const height = await page.evaluate(() => Math.ceil(document.body.scrollHeight));
 
-    const pdf = await page.pdf({
+    const pdfData = await page.pdf({
       width: '430px',
       height: height + 'px',
       printBackground: true,
@@ -84,12 +84,16 @@ app.post('/generate-pdf', async (req, res) => {
       pageRanges: '1'
     });
 
+    // Puppeteer v23+ returns a Uint8Array. Wrap in a Buffer so Express sends
+    // it as raw binary (otherwise res.send turns it into JSON -> corrupt PDF).
+    const pdf = Buffer.from(pdfData);
+
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Disposition': 'attachment; filename="Treatment_Plan.pdf"',
       'Content-Length': pdf.length
     });
-    res.send(pdf);
+    res.end(pdf);
 
   } catch (err) {
     console.error('PDF generation error:', err);
