@@ -58,6 +58,12 @@ app.post('/generate-pdf', async (req, res) => {
 
     await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
+    // Render using SCREEN styles, not PRINT. The page's @media print rules force
+    // page-breaks (page-break-after on cover etc.) which, combined with a single
+    // tall PDF page, leave everything below the cover BLACK. Screen media renders
+    // the content continuously, exactly as seen in the browser.
+    await page.emulateMediaType('screen');
+
     // Wait for fonts + images, capped so it never hangs
     await page.evaluate(async () => {
       const fontsReady = (document.fonts && document.fonts.ready)
