@@ -1,10 +1,12 @@
 // ============================================
 //  ADT Treatment Plan - PDF Generation Server
-//  Puppeteer + Express (low-memory / Render free tier)
+//  Puppeteer screenshot -> PDF (pdf-lib)
+//  Reliable: no page-break / black-page issues
 // ============================================
 
 const express = require('express');
 const puppeteer = require('puppeteer');
+const { PDFDocument } = require('pdf-lib');
 
 const app = express();
 app.use(express.json({ limit: '30mb' }));
@@ -23,26 +25,22 @@ app.get('/', (req, res) => {
 
 let browser = null;
 async function getBrowser() {
-  try {
-    if (browser && browser.connected) return browser;
-  } catch (e) {}
+  try { if (browser && browser.connected) return browser; } catch (e) {}
   browser = await puppeteer.launch({
     headless: 'new',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-software-rasterizer',
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-background-timer-throttling',
-      '--disable-features=site-per-process',
-      '--js-flags=--max-old-space-size=460'
+      '--disable-gpu'
     ]
   });
   return browser;
 }
+
+// Image sharpness. 1.5 keeps us under Chromium's ~16384px capture limit
+// and under the PDF 14400pt page-size limit for this page height.
+const SCALE = 1.5;
 
 app.post('/generate-pdf', async (req, res) => {
   const { html } = req.body;
@@ -52,16 +50,11 @@ app.post('/generate-pdf', async (req, res) => {
   try {
     const b = await getBrowser();
     page = await b.newPage();
-
-    // deviceScaleFactor 1 = lowest memory (document stays sharp enough)
-    await page.setViewport({ width: 430, height: 1000, deviceScaleFactor: 1 });
+    await page.setViewport({ width: 430, height: 1000, deviceScaleFactor: SCALE });
 
     await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
-    // Render using SCREEN styles, not PRINT. The page's @media print rules force
-    // page-breaks (page-break-after on cover etc.) which, combined with a single
-    // tall PDF page, leave everything below the cover BLACK. Screen media renders
-    // the content continuously, exactly as seen in the browser.
+    // Use SCREEN styles (avoids @media print page-breaks that cause black pages)
     await page.emulateMediaType('screen');
 
     // Wait for fonts + images, capped so it never hangs
@@ -77,23 +70,21 @@ app.post('/generate-pdf', async (req, res) => {
         new Promise(r => setTimeout(r, 6000))
       ]);
     });
+    await new Promise(r => setTimeout(r, 400));
 
-    await new Promise(r => setTimeout(r, 300));
+    // Full-page screenshot -> always renders the whole page correctly
+    const pngBytes = await page.screenshot({ fullPage: true, type: 'png' });
 
-    const height = await page.evaluate(() => Math.ceil(document.body.scrollHeight));
+    // Embed the screenshot into a single-page PDF sized to the CSS dimensions
+    const pdfDoc = await PDFDocument.create();
+    const png = await pdfDoc.embedPng(pngBytes);
+    const wPt = png.width / SCALE;
+    const hPt = png.height / SCALE;
+    const pdfPage = pdfDoc.addPage([wPt, hPt]);
+    pdfPage.drawImage(png, { x: 0, y: 0, width: wPt, height: hPt });
+    const pdfBytes = await pdfDoc.save();
 
-    const pdfData = await page.pdf({
-      width: '430px',
-      height: height + 'px',
-      printBackground: true,
-      margin: { top: '0', right: '0', bottom: '0', left: '0' },
-      pageRanges: '1'
-    });
-
-    // Puppeteer v23+ returns a Uint8Array. Wrap in a Buffer so Express sends
-    // it as raw binary (otherwise res.send turns it into JSON -> corrupt PDF).
-    const pdf = Buffer.from(pdfData);
-
+    const pdf = Buffer.from(pdfBytes);
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Disposition': 'attachment; filename="Treatment_Plan.pdf"',
